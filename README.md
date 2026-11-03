@@ -3,6 +3,59 @@
 Interaktives Bash-Skript zum Verwalten von [Caddy](https://caddyserver.com): Domains, Reverse-Proxys,
 Weiterleitungen, statische Seiten und mehr – mit Pfeiltasten-Menü.
 
+## Installation (Debian/Ubuntu, als root)
+
+```bash
+apt-get install -y curl
+curl -fsSL https://raw.githubusercontent.com/Rocco5/caddy-manager/main/caddy-manager.sh -o /usr/local/bin/caddy-manager
+chmod +x /usr/local/bin/caddy-manager
+caddy-manager
+```
+
+Aktualisieren: dieselben `curl`/`chmod`-Befehle erneut ausführen. Caddy selbst installiert das Menü bei Bedarf
+(„Caddy-Dienst“ → „Caddy installieren“). Das Skript läuft nur, solange das Menü offen ist; Caddy läuft als
+eigener Dienst weiter.
+
+### Server absichern: fail2ban (empfohlen)
+
+Ein öffentlich erreichbarer Server wird ständig per SSH angegriffen. fail2ban sperrt IPs nach mehreren
+Fehlversuchen automatisch.
+
+```bash
+apt-get install -y fail2ban
+```
+
+Konfiguration in `/etc/fail2ban/jail.local` (`ignoreip` an dein eigenes Netz anpassen, sonst sperrst du dich aus):
+
+```ini
+[DEFAULT]
+ignoreip = 127.0.0.1/8 ::1 192.168.0.0/16
+bantime  = 1h
+findtime = 10m
+maxretry = 4
+backend  = systemd
+
+# Wiederholungstäter länger sperren
+bantime.increment = true
+bantime.factor    = 2
+bantime.maxtime   = 4w
+
+[sshd]
+enabled = true
+port    = ssh
+```
+
+Aktivieren und prüfen:
+
+```bash
+systemctl enable --now fail2ban
+fail2ban-client status sshd
+```
+
+Eine fälschlich gesperrte IP entsperren: `fail2ban-client set sshd unbanip 1.2.3.4`.
+Besser noch: SSH nur mit Schlüsseln erlauben (`PasswordAuthentication no` in `/etc/ssh/sshd_config`,
+vorher den Schlüssel-Login testen).
+
 ## Start
 
 ```bash
