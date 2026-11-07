@@ -67,6 +67,7 @@ sudo ./caddy-manager.sh help     # Kommandozeilen-Modus
 
 - Reverse-Proxy, Domain-Weiterleitung (301/302/307/308), www ↔ ohne www, statische Seite/SPA, Wartungsseite
 - Regeln zu bestehenden Seiten: Pfad-Redirect, Pfad sperren, IP-Filter, Rewrite
+- Passwortschutz (Basic-Auth) für eine ganze Seite setzen, ändern und entfernen, auch bei bestehenden Seiten
 - Seiten bearbeiten, ein-/ausschalten, umbenennen, löschen
 - Bestehende Site-Blöcke der Caddyfile in die Verwaltung übernehmen (`import`)
 - Diagnose (validate, fmt, DNS, HTTP-Test, Zertifikate), Dienststeuerung, Caddy-Installation (Debian/Ubuntu)
@@ -85,7 +86,24 @@ Umgebungsvariablen: `CADDY_DIR`, `CADDYFILE`, `SITES_DIR`, `BACKUP_DIR`, `CM_NO_
 sudo ./caddy-manager.sh proxy app.example.de 127.0.0.1:8000
 sudo ./caddy-manager.sh redirect alt.example.de https://neu.example.de 301
 sudo ./caddy-manager.sh static docs.example.de /var/www/docs
+sudo ./caddy-manager.sh auth app.example.de vorschau     # Passwortschutz setzen (Passwort wird abgefragt)
+sudo ./caddy-manager.sh auth-off app.example.de          # Passwortschutz entfernen
 sudo ./caddy-manager.sh list | import | validate | reload | backup
 ```
+
+## Passwortschutz (Basic-Auth)
+
+Im Menü unter „Regel zu bestehender Seite → Passwortschutz“ oder auf der Kommandozeile mit `auth` und `auth-off`.
+In `list` tragen geschützte Seiten ein 🔒.
+
+- Gespeichert wird nur der Hash (bcrypt), nie das Passwort. Auf der Kommandozeile steht das Passwort nie als
+  Argument: Es wird im Terminal abgefragt oder aus der Umgebungsvariable `CM_AUTH_PASSWORD` gelesen
+  (`CM_AUTH_PASSWORD=… sudo -E ./caddy-manager.sh auth app.example.de vorschau`).
+- Die Datei der Seite ist danach nur für root und die Gruppe `caddy` lesbar (Rechte 640), weil der Hash darin steht.
+  Sie gehört nicht in ein Git-Repository.
+- Ein vorhandener Schutz wird beim Setzen ersetzt (ein Benutzer pro Seite). Vor jeder Änderung gibt es ein Backup,
+  bei ungültiger Konfiguration wird zurückgerollt.
+- Der Schutz gilt für die ganze Seite. Auch Rückrufe von außen (z. B. von einem Zahlungsanbieter) müssten dann ein
+  Passwort mitschicken; das Zertifikat holt Caddy trotzdem ohne Passwort ab.
 
 Hinweis: Bisher nur mit einem Caddy-Platzhalter getestet, nicht mit einem echten Caddy.
