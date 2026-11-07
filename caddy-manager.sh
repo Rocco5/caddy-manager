@@ -20,7 +20,7 @@
 # ──────────────────────────────────────────────────────────────────────────────
 set -o pipefail
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 CADDY_DIR="${CADDY_DIR:-/etc/caddy}"
 CADDYFILE="${CADDYFILE:-$CADDY_DIR/Caddyfile}"
 SITES_DIR="${SITES_DIR:-$CADDY_DIR/conf.d}"
@@ -201,8 +201,10 @@ print_sites() {
     any=1; ((i++))
     local st
     site_active "$f" && st="${C_GREEN}aktiv${C_RESET}   " || st="${C_RED}aus${C_RESET}     "
-    printf '  %-3s %-30s %-14s %s %s\n' "$i" "$(site_addr "$f" | cut -c1-30)" \
-      "$(type_label "$(site_type "$f")")" "$st" "$(site_target "$f")"
+    local lock=""
+    [[ -n $(site_auth_user "$f") ]] && lock=" 🔒"
+    printf '  %-3s %-30s %-14s %s %s%s\n' "$i" "$(site_addr "$f" | cut -c1-30)" \
+      "$(type_label "$(site_type "$f")")" "$st" "$(site_target "$f")" "$lock"
   done < <(site_files)
   ((any)) || info "Noch keine Seiten angelegt."
 }
@@ -612,18 +614,91 @@ insert_rule() { # insert_rule DATEI REGELTEXT
   rm -f "$tmp"
 }
 
+# ── Passwortschutz (Basic-Auth) einer bestehenden Seite ─────────────────────
+# Benutzername des Passwortschutzes einer Seite (leer = ungeschützt)
+site_auth_user() {
+  awk '
+    blk { print $1; exit }
+    /^[ \t]*(basic_auth|basicauth)[ \t]*\{[ \t]*$/ { blk = 1 }' "$1"
+}
+
+# Entfernt vorhandene basic_auth-Blöcke aus DATEI
+remove_auth_block() {
+  local file=$1 tmp
+  tmp=$(mktemp)
+  awk '
+    skip { if ($0 ~ /^[ \t]*\}[ \t]*$/) skip = 0; next }
+    /^[ \t]*(basic_auth|basicauth)[ \t]*\{[ \t]*$/ { skip = 1; next }
+    { print }' "$file" >"$tmp" && cat "$tmp" >"$file"
+  rm -f "$tmp"
+}
+
+# Fügt eine Anweisung für die ganze Seite ein: hinter dem Platzhalter, sonst hinter der ersten „{“-Zeile
+insert_site_level() { # insert_site_level DATEI TEXT
+  local file=$1 tmp
+  if grep -qF "$MARKER" "$file"; then insert_rule "$file" "$2"; return; fi
+  tmp=$(mktemp)
+  RULE=$2 awk 'BEGIN{d=0} {print} !d && /\{[ \t]*$/ {print ENVIRON["RULE"]; d=1}' "$file" >"$tmp" \
+    && cat "$tmp" >"$file"
+  rm -f "$tmp"
+}
+
+# Setzt Benutzer und Passwort (ersetzt einen vorhandenen Schutz). Der Aufrufer sichert vorher und prüft danach.
+# Das Passwort wird nie gespeichert, nur der Hash; die Datei ist danach nur für root und Caddy lesbar.
+set_site_auth() { # set_site_auth DATEI BENUTZER PASSWORT
+  local file=$1 user=$2 pass=$3 hash
+  [[ $user =~ ^[A-Za-z0-9._-]+$ ]] || { err "Ungültiger Benutzername (erlaubt: Buchstaben, Ziffern, . _ -)."; return 1; }
+  [[ -n $pass ]] || { err "Leeres Passwort."; return 1; }
+  have caddy || { err "Caddy fehlt (für den Passwort-Hash nötig)."; return 1; }
+  hash=$(caddy hash-password --plaintext "$pass" 2>/dev/null)
+  [[ -n $hash ]] || { err "Passwort-Hash konnte nicht erzeugt werden."; return 1; }
+  remove_auth_block "$file"
+  insert_site_level "$file" $'\tbasic_auth {\n\t\t'"$user $hash"$'\n\t}' || return 1
+  if id caddy >/dev/null 2>&1; then chgrp caddy "$file" 2>/dev/null && chmod 640 "$file"; fi
+  return 0
+}
+
+site_auth_menu() { # site_auth_menu DATEI
+  local file=$1 cur user pass pass2 snap
+  cur=$(site_auth_user "$file")
+  menu "Passwortschutz für $(site_addr "$file") ($([[ -n $cur ]] && echo "geschützt, Benutzer: $cur" || echo "ungeschützt"))" \
+    "🔑 Benutzer und Passwort setzen / ersetzen" \
+    "🔓 Passwortschutz entfernen" \
+    "↩  Zurück"
+  case $MENU_IDX in
+    0)
+      ask user "Benutzername" "${cur:-vorschau}" || return
+      ask_secret pass "Passwort" || return
+      ask_secret pass2 "Passwort wiederholen" || return
+      [[ $pass == "$pass2" ]] || { err "Die Passwörter sind nicht gleich."; pause; return; }
+      snap=$(snapshot)
+      if set_site_auth "$file" "$user" "$pass"; then commit_change "$snap" && ok "Passwortschutz gesetzt (Benutzer: $user)"
+      else restore_snapshot "$snap"; fi
+      pause ;;
+    1)
+      [[ -n $cur ]] || { info "Diese Seite hat keinen Passwortschutz."; pause; return; }
+      confirm "Passwortschutz von $(site_addr "$file") wirklich entfernen? Die Seite ist danach offen." n || return
+      snap=$(snapshot)
+      remove_auth_block "$file"
+      commit_change "$snap" && ok "Passwortschutz entfernt"
+      pause ;;
+  esac
+}
+
 add_rule() {
   pick_site "Zu welcher Seite soll eine Regel hinzukommen?" || return
   local file=$SITE_FILE
-  if ! grep -qF "$MARKER" "$file"; then
-    err "Diese Seite unterstützt keine automatischen Regeln (kein Platzhalter)."; pause; return
-  fi
   menu "Regel für $(site_addr "$file")" \
     "↪  Pfad weiterleiten      (/alt → /neu oder andere URL)" \
     "🚫 Pfad sperren           (liefert 403)" \
     "🔒 Pfad nur für bestimmte IPs freigeben" \
     "✏  Pfad intern umschreiben (rewrite)" \
+    "🔑 Passwortschutz (Basic-Auth) für die ganze Seite" \
     "↩  Zurück"
+  if ((MENU_IDX == 4)); then site_auth_menu "$file"; return; fi
+  if ((MENU_IDX >= 0 && MENU_IDX <= 3)) && ! grep -qF "$MARKER" "$file"; then
+    err "Diese Seite unterstützt keine automatischen Regeln (kein Platzhalter)."; pause; return
+  fi
   local rule="" from to code ips id
   case $MENU_IDX in
     0)
@@ -1042,6 +1117,9 @@ caddy-manager $VERSION
   proxy DOMAIN BACKEND              Reverse-Proxy anlegen   (z. B. proxy app.example.de 127.0.0.1:8000)
   redirect VON ZIEL [CODE]          Weiterleitung anlegen    (CODE: 301 Standard, 302, 307, 308)
   static DOMAIN VERZEICHNIS         statische Seite anlegen
+  auth DOMAIN BENUTZER              Passwortschutz (Basic-Auth) setzen oder ersetzen. Das Passwort steht nie
+                                    als Argument: Umgebungsvariable CM_AUTH_PASSWORD oder Abfrage im Terminal
+  auth-off DOMAIN                   Passwortschutz entfernen
   remove DOMAIN                     Seite löschen (mit Backup)
   enable DOMAIN | disable DOMAIN    Seite ein-/ausschalten
   validate                          Konfiguration prüfen
@@ -1090,6 +1168,22 @@ cli() {
       OUT=""; site_header static
       L "${1,,} {"; L $'\troot * '"$2"; L $'\tencode zstd gzip'; L $'\t'"$MARKER"; L $'\tfile_server'; L "}"
       cli_write "${1,,}" ;;
+    auth)
+      [[ $# -ge 2 && ${1,,} =~ $RE_HOST ]] || { usage; exit 2; }
+      local f snap pass=${CM_AUTH_PASSWORD:-}
+      f=$(cli_find "$1") || { err "Nicht gefunden: $1"; exit 1; }
+      if [[ -z $pass ]]; then
+        [[ -t 0 ]] || { err "Passwort fehlt: CM_AUTH_PASSWORD setzen oder im Terminal ausführen."; exit 2; }
+        ask_secret pass "Passwort" || exit 1
+      fi
+      snap=$(snapshot)
+      set_site_auth "$f" "$2" "$pass" || exit 1
+      commit_change "$snap" && ok "Passwortschutz gesetzt (Benutzer: $2)" ;;
+    auth-off)
+      local f snap; f=$(cli_find "${1:-}") || { err "Nicht gefunden: ${1:-}"; exit 1; }
+      [[ -n $(site_auth_user "$f") ]] || { info "Kein Passwortschutz vorhanden"; exit 0; }
+      snap=$(snapshot); remove_auth_block "$f"
+      commit_change "$snap" && ok "Passwortschutz entfernt" ;;
     remove)
       local f snap; f=$(cli_find "${1:-}") || { err "Nicht gefunden: ${1:-}"; exit 1; }
       snap=$(snapshot); rm -f "$f"; commit_change "$snap" ;;
@@ -1125,7 +1219,7 @@ main_menu() {
       "🔁 www ↔ ohne www weiterleiten" \
       "📁 Neue statische Website / SPA" \
       "🚧 Wartungsseite einrichten" \
-      "➕ Regel zu bestehender Seite (Pfad-Redirect, Sperre, IP-Filter)" \
+      "➕ Regel zu bestehender Seite (Pfad-Redirect, Sperre, IP-Filter, Passwortschutz)" \
       "📋 Alle Seiten anzeigen" \
       "🗂  Seiten verwalten (bearbeiten, ein/aus, löschen)" \
       "🔍 Prüfen & Diagnose" \
